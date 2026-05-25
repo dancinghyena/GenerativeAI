@@ -1,0 +1,524 @@
+import streamlit as st
+import json
+import os
+import pandas as pd
+from hashlib import sha256
+
+# ─────────────────────────────────────────────
+# Import your backend classes
+# ─────────────────────────────────────────────
+# from student import Student
+# from database import Database
+# from chatbot import Chatbot
+
+# ─────────────────────────────────────────────
+# Constants – file paths
+# ─────────────────────────────────────────────
+CREDENTIALS_FILE = "credentials.json"
+USERS_FILE       = "users.json"
+
+
+# ══════════════════════════════════════════════
+# Helper utilities
+# ══════════════════════════════════════════════
+
+def hash_password(password: str) -> str:
+    """Return the SHA-256 hex digest of a plain-text password."""
+    return sha256(password.encode()).hexdigest()
+
+
+def load_json(filepath: str) -> dict:
+    """Load a JSON file; return an empty dict if the file doesn't exist."""
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_json(filepath: str, data: dict) -> None:
+    """Persist a dict to a JSON file."""
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+def verify_admin(username: str, password: str) -> bool:
+    """Check admin credentials against credentials.json (SHA-256 aware)."""
+    creds = load_json(CREDENTIALS_FILE)
+    admin = creds.get("admin", {})
+    stored_pw = admin.get("password", "")
+
+    # Support both plain-text (legacy) and hashed passwords
+    if stored_pw == password or stored_pw == hash_password(password):
+        return admin.get("username") == username
+    return False
+
+
+def verify_user(username: str, password: str) -> bool:
+    """Check a normal user's credentials against users.json."""
+    users = load_json(USERS_FILE)
+    user  = users.get(username, {})
+    stored_pw = user.get("password", "")
+
+    return stored_pw == hash_password(password)
+
+
+def register_user(username: str, password: str) -> tuple[bool, str]:
+    """
+    Register a new user.
+    Returns (success: bool, message: str).
+    """
+    if not username or not password:
+        return False, "Username and password cannot be empty."
+
+    users = load_json(USERS_FILE)
+    if username in users:
+        return False, "Username already exists. Please choose another."
+
+    users[username] = {"username": username, "password": hash_password(password)}
+    save_json(USERS_FILE, users)
+    return True, "Registration successful! You can now log in."
+
+
+# ══════════════════════════════════════════════
+# Page configuration (must be first Streamlit call)
+# ══════════════════════════════════════════════
+
+st.set_page_config(
+    page_title="Student Management System",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ──────────────────────────────────────────────
+# Minimal custom styling
+# ──────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+        .main-title   { font-size:2.2rem; font-weight:700; color:#1e3a5f; }
+        .sub-title    { font-size:1.1rem;  color:#4a6fa5;  margin-bottom:1.5rem; }
+        .card         { background:#f0f4ff; border-radius:10px; padding:1.2rem 1.5rem;
+                        margin-bottom:1rem; border-left:4px solid #4a6fa5; }
+        .success-box  { background:#e8f5e9; border-left:4px solid #43a047; border-radius:8px;
+                        padding:.8rem 1rem; }
+        .error-box    { background:#ffebee; border-left:4px solid #e53935; border-radius:8px;
+                        padding:.8rem 1rem; }
+        .chat-user    { background:#dbeafe; border-radius:10px; padding:.6rem 1rem;
+                        margin:.3rem 0; text-align:right; }
+        .chat-bot     { background:#f3f4f6; border-radius:10px; padding:.6rem 1rem;
+                        margin:.3rem 0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ══════════════════════════════════════════════
+# Session-state initialisation
+# ══════════════════════════════════════════════
+
+defaults = {
+    "logged_in":   False,
+    "user_type":   None,       # "admin" | "user"
+    "username":    None,
+    "page":        "login",    # "login" | "register"
+    "chat_history": [],
+}
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+
+# ══════════════════════════════════════════════
+# Logout helper
+# ══════════════════════════════════════════════
+
+def logout():
+    for key in defaults:
+        st.session_state[key] = defaults[key]
+    st.rerun()
+
+
+# ══════════════════════════════════════════════
+# ① LOGIN PAGE
+# ══════════════════════════════════════════════
+
+def render_login():
+    col_l, col_c, col_r = st.columns([1, 1.6, 1])
+    with col_c:
+        st.markdown('<p class="main-title">🎓 Student Management System</p>',
+                    unsafe_allow_html=True)
+        st.markdown('<p class="sub-title">Please log in to continue</p>',
+                    unsafe_allow_html=True)
+
+        login_type = st.radio("Login as:", ["User", "Admin"],
+                              horizontal=True, key="login_type_radio")
+
+        with st.form("login_form"):
+            username = st.text_input("Username", placeholder="Enter your username")
+            password = st.text_input("Password", type="password",
+                                     placeholder="Enter your password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+
+        if submitted:
+            if login_type == "Admin":
+                if verify_admin(username, password):
+                    st.session_state.logged_in = True
+                    st.session_state.user_type = "admin"
+                    st.session_state.username  = username
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid admin credentials.")
+            else:
+                if verify_user(username, password):
+                    st.session_state.logged_in = True
+                    st.session_state.user_type = "user"
+                    st.session_state.username  = username
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password.")
+
+        st.markdown("---")
+        st.markdown("Don't have an account?")
+        if st.button("Register here", use_container_width=True):
+            st.session_state.page = "register"
+            st.rerun()
+
+
+# ══════════════════════════════════════════════
+# ② REGISTRATION PAGE
+# ══════════════════════════════════════════════
+
+def render_register():
+    col_l, col_c, col_r = st.columns([1, 1.6, 1])
+    with col_c:
+        st.markdown('<p class="main-title">📝 Create an Account</p>',
+                    unsafe_allow_html=True)
+
+        with st.form("register_form"):
+            new_user = st.text_input("Choose a Username", placeholder="username")
+            new_pw   = st.text_input("Choose a Password", type="password",
+                                     placeholder="••••••••")
+            confirm  = st.text_input("Confirm Password", type="password",
+                                     placeholder="••••••••")
+            submitted = st.form_submit_button("Register", use_container_width=True)
+
+        if submitted:
+            if new_pw != confirm:
+                st.error("❌ Passwords do not match.")
+            else:
+                ok, msg = register_user(new_user, new_pw)
+                if ok:
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ {msg}")
+
+        st.markdown("---")
+        if st.button("← Back to Login", use_container_width=True):
+            st.session_state.page = "login"
+            st.rerun()
+
+
+# ══════════════════════════════════════════════
+# ③ ADMIN DASHBOARD
+# ══════════════════════════════════════════════
+
+def render_admin_dashboard():
+    # ── Sidebar ──────────────────────────────
+    with st.sidebar:
+        st.markdown(f"### 👋 Welcome, **{st.session_state.username}**")
+        st.markdown("---")
+        section = st.radio(
+            "Navigate to:",
+            ["📊 View Students", "➕ Add Student", "✏️ Update Student",
+             "🗑️ Delete Student", "📂 Bulk Upload (CSV)"],
+        )
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True):
+            logout()
+
+    st.markdown('<p class="main-title">🛠️ Admin Dashboard</p>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ── Initialise DB connection ──────────────
+    # db = Database()          # ← uncomment when your Database class is ready
+
+    # ─────────────────────────────────────────
+    # VIEW STUDENTS
+    # ─────────────────────────────────────────
+    if section == "📊 View Students":
+        st.subheader("All Students")
+
+        # students = db.fetch_all_students()
+        # Replace the two lines below with real DB data when ready:
+        students = st.session_state.get("mock_students", [])
+
+        if students:
+            df = pd.DataFrame(students, columns=["ID", "Name", "Age", "Grade"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No students found in the database.")
+
+    # ─────────────────────────────────────────
+    # ADD STUDENT
+    # ─────────────────────────────────────────
+    elif section == "➕ Add Student":
+        st.subheader("Add a New Student")
+        with st.form("add_student_form"):
+            name  = st.text_input("Student Name")
+            age   = st.number_input("Age", min_value=1, max_value=100, step=1)
+            grade = st.text_input("Grade (e.g. A, B+, 90%)")
+            add   = st.form_submit_button("Add Student", use_container_width=True)
+
+        if add:
+            if not name or not grade:
+                st.error("❌ Name and Grade are required.")
+            else:
+                # student = Student(name=name, age=int(age), grade=grade)
+                # db.insert_student(student)
+                # Mock persistence for demo purposes:
+                mock = st.session_state.get("mock_students", [])
+                new_id = (mock[-1][0] + 1) if mock else 1
+                mock.append([new_id, name, int(age), grade])
+                st.session_state["mock_students"] = mock
+                st.success(f"✅ Student **{name}** added successfully!")
+
+    # ─────────────────────────────────────────
+    # UPDATE STUDENT
+    # ─────────────────────────────────────────
+    elif section == "✏️ Update Student":
+        st.subheader("Update an Existing Student")
+        student_id = st.number_input("Enter Student ID to update",
+                                     min_value=1, step=1)
+        with st.form("update_student_form"):
+            new_name  = st.text_input("New Name  (leave blank to keep current)")
+            new_age   = st.number_input("New Age   (0 = keep current)",
+                                        min_value=0, max_value=120, step=1)
+            new_grade = st.text_input("New Grade (leave blank to keep current)")
+            update    = st.form_submit_button("Update Student", use_container_width=True)
+
+        if update:
+            mock = st.session_state.get("mock_students", [])
+            found = False
+            for row in mock:
+                if row[0] == student_id:
+                    if new_name:  row[1] = new_name
+                    if new_age:   row[2] = int(new_age)
+                    if new_grade: row[3] = new_grade
+                    found = True
+                    break
+            st.session_state["mock_students"] = mock
+
+            if found:
+                st.success(f"✅ Student ID **{student_id}** updated successfully.")
+            else:
+                st.error(f"❌ No student found with ID {student_id}.")
+
+    # ─────────────────────────────────────────
+    # DELETE STUDENT
+    # ─────────────────────────────────────────
+    elif section == "🗑️ Delete Student":
+        st.subheader("Delete a Student")
+        student_id = st.number_input("Enter Student ID to delete",
+                                     min_value=1, step=1)
+
+        if st.button("Delete Student", type="primary"):
+            mock = st.session_state.get("mock_students", [])
+            before = len(mock)
+            mock = [r for r in mock if r[0] != student_id]
+            st.session_state["mock_students"] = mock
+
+            if len(mock) < before:
+                st.success(f"✅ Student ID **{student_id}** deleted successfully.")
+            else:
+                st.error(f"❌ No student found with ID {student_id}.")
+
+    # ─────────────────────────────────────────
+    # BULK UPLOAD (CSV)
+    # ─────────────────────────────────────────
+    elif section == "📂 Bulk Upload (CSV)":
+        st.subheader("Bulk Upload Students via CSV")
+        st.markdown(
+            "Upload a CSV file with columns: **name, age, grade**  \n"
+            "An `id` column is optional — the database auto-generates IDs."
+        )
+        uploaded = st.file_uploader("Choose a CSV file", type=["csv"])
+        if uploaded:
+            try:
+                df = pd.read_csv(uploaded)
+                required_cols = {"name", "age", "grade"}
+                if not required_cols.issubset(set(df.columns.str.lower())):
+                    st.error("❌ CSV must contain columns: name, age, grade")
+                else:
+                    df.columns = df.columns.str.lower()
+                    st.dataframe(df, use_container_width=True)
+
+                    if st.button("Upload to Database"):
+                        mock = st.session_state.get("mock_students", [])
+                        next_id = (mock[-1][0] + 1) if mock else 1
+                        for _, row in df.iterrows():
+                            mock.append([next_id, row["name"],
+                                         int(row["age"]), row["grade"]])
+                            next_id += 1
+                        st.session_state["mock_students"] = mock
+                        st.success(f"✅ {len(df)} student(s) uploaded successfully!")
+            except Exception as e:
+                st.error(f"❌ Failed to process file: {e}")
+
+
+# ══════════════════════════════════════════════
+# ④ USER DASHBOARD  (Chatbot)
+# ══════════════════════════════════════════════
+
+def render_user_dashboard():
+    # ── Sidebar ──────────────────────────────
+    with st.sidebar:
+        st.markdown(f"### 👋 Hello, **{st.session_state.username}**")
+        st.markdown("---")
+        st.markdown("💡 **You can ask things like:**")
+        st.caption("• How many students are there?")
+        st.caption("• Show me students in grade A")
+        st.caption("• What is the average age?")
+        st.caption("• Who is the youngest student?")
+        st.markdown("---")
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+        if st.button("🚪 Logout", use_container_width=True):
+            logout()
+
+    st.markdown('<p class="main-title">🤖 Student Info Chatbot</p>',
+                unsafe_allow_html=True)
+    st.markdown("Ask me anything about the students in the database.")
+    st.markdown("---")
+
+    # ── Initialise DB + Chatbot ───────────────
+    # db      = Database()
+    # chatbot = Chatbot(db)
+
+    # ── Display chat history ──────────────────
+    chat_container = st.container()
+    with chat_container:
+        for entry in st.session_state.chat_history:
+            role, text = entry["role"], entry["text"]
+            if role == "user":
+                st.markdown(
+                    f'<div class="chat-user">🧑 <strong>You:</strong> {text}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="chat-bot">🤖 <strong>Bot:</strong> {text}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
+
+    # ── Input bar (at the bottom) ─────────────
+    with st.form("chat_form", clear_on_submit=True):
+        col_input, col_btn = st.columns([5, 1])
+        with col_input:
+            user_input = st.text_input(
+                "Your message",
+                placeholder="e.g. How many students are enrolled?",
+                label_visibility="collapsed",
+            )
+        with col_btn:
+            send = st.form_submit_button("Send", use_container_width=True)
+
+    if send and user_input.strip():
+        # Save the user's message
+        st.session_state.chat_history.append(
+            {"role": "user", "text": user_input.strip()}
+        )
+
+        # ── Get bot response ──────────────────
+        # Replace this stub with: response = chatbot.respond(user_input)
+        response = _mock_chatbot_response(user_input.strip())
+
+        st.session_state.chat_history.append(
+            {"role": "bot", "text": response}
+        )
+        st.rerun()
+
+
+def _mock_chatbot_response(query: str) -> str:
+    """
+    Stub response generator.
+    Replace this entire function body with:
+        return chatbot.respond(query)
+    once your Chatbot class is connected.
+    """
+    q = query.lower()
+    mock = st.session_state.get("mock_students", [])
+
+    if "how many" in q or "count" in q or "total" in q:
+        return f"There are currently **{len(mock)}** student(s) in the database."
+
+    if "average age" in q or "avg age" in q:
+        if mock:
+            avg = sum(r[2] for r in mock) / len(mock)
+            return f"The average age of all students is **{avg:.1f}** years."
+        return "No student records found to calculate an average."
+
+    if "youngest" in q:
+        if mock:
+            s = min(mock, key=lambda r: r[2])
+            return f"The youngest student is **{s[1]}** (Age {s[2]}, Grade {s[3]})."
+        return "No student records found."
+
+    if "oldest" in q:
+        if mock:
+            s = max(mock, key=lambda r: r[2])
+            return f"The oldest student is **{s[1]}** (Age {s[2]}, Grade {s[3]})."
+        return "No student records found."
+
+    if "grade" in q:
+        # Extract a grade keyword from the query (e.g. "grade A")
+        words = query.upper().split()
+        target = None
+        for i, w in enumerate(words):
+            if w == "GRADE" and i + 1 < len(words):
+                target = words[i + 1].strip(".,!?")
+                break
+        if target:
+            results = [r for r in mock if r[3].upper() == target]
+            if results:
+                names = ", ".join(r[1] for r in results)
+                return f"Students in Grade **{target}**: {names}."
+            return f"No students found in Grade **{target}**."
+        return ("Please specify the grade you're looking for, "
+                "e.g. 'Show me students in grade A'.")
+
+    if "list" in q or "show all" in q or "all students" in q:
+        if mock:
+            lines = "\n".join(
+                f"• ID {r[0]}: {r[1]}, Age {r[2]}, Grade {r[3]}" for r in mock
+            )
+            return f"Here are all students:\n\n{lines}"
+        return "The student database is currently empty."
+
+    # Default fallback
+    return ("I'm not sure how to answer that. Try asking about student counts, "
+            "average age, youngest/oldest students, or students by grade.")
+
+
+# ══════════════════════════════════════════════
+# ROUTER – decides which page to render
+# ══════════════════════════════════════════════
+
+def main():
+    if not st.session_state.logged_in:
+        if st.session_state.page == "register":
+            render_register()
+        else:
+            render_login()
+    else:
+        if st.session_state.user_type == "admin":
+            render_admin_dashboard()
+        else:
+            render_user_dashboard()
+
+
+if __name__ == "__main__":
+    main()
