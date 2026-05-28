@@ -100,10 +100,6 @@ GenerativeAI/
 └── README.md
 ```
 
-## Author
-
-**Ali Kele** — [dancinghyena](https://github.com/dancinghyena)
-
 ## License
 
 Academic / coursework project.
