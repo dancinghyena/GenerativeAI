@@ -1,6 +1,6 @@
 # Music Store Customer Support (Multi-Agent)
 
-Bare-bones LangGraph multi-agent customer support system for a digital music store, using the Chinook SQLite database.
+LangGraph multi-agent customer support system for a digital music store, using the Chinook SQLite database.
 
 ## Features
 

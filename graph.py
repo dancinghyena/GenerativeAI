@@ -15,8 +15,13 @@ from typing_extensions import TypedDict
 
 from db import run_query
 from memory_store import preference_memory
-from tools_invoice import INVOICE_TOOLS
-from tools_music import MUSIC_TOOLS
+from tools_invoice import INVOICE_TOOLS, get_invoices_by_customer_sorted_by_date
+from tools_music import (
+    MUSIC_TOOLS,
+    get_albums_by_artist,
+    get_songs_by_genre,
+    get_tracks_by_artist,
+)
 
 
 def _keep_existing(existing: str, new: str) -> str:
@@ -226,65 +231,119 @@ def _inject_customer_id(tool_name: str, args: dict, customer_id: str) -> dict:
     return args
 
 
-def _run_tool_agent(llm, tools, system_prompt: str, state: State) -> AIMessage:
-    bound = llm.bind_tools(tools)
-    tool_map = {t.name: t for t in tools}
+def _music_fallback(question: str, memory: str) -> str:
+    """Deterministic catalog lookup if Groq tool-calling fails."""
+    q = (question or "").lower()
+    mem = (memory or "").lower()
+    parts = []
 
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
-    if len(messages) > 12:
-        messages = [messages[0]] + messages[-11:]
+    artist_match = re.search(
+        r"(?:by|from)\s+(?:the\s+)?([a-z0-9][\w\s&/'-]{1,40})", q, re.I
+    )
+    artist = artist_match.group(1).strip() if artist_match else ""
+    if not artist:
+        for name in ["rolling stones", "metallica", "queen", "ac/dc", "beatles", "u2"]:
+            if name in q or name in mem:
+                artist = name
+                break
 
-    response = bound.invoke(messages)
-    messages.append(response)
-
-    if getattr(response, "tool_calls", None):
-        for call in response.tool_calls:
-            tool = tool_map.get(call["name"])
-            args = _inject_customer_id(
-                call["name"], dict(call.get("args") or {}), state.get("customer_id") or ""
-            )
-            try:
-                result = tool.invoke(args) if tool else f"Unknown tool: {call['name']}"
-            except Exception as exc:
-                result = f"Tool error: {exc}"
-            messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
-        response = bound.invoke(messages)
-
-    return response
+    if artist and ("album" in q or "albums" in q):
+        parts.append(f"Albums for {artist.title()}:\n{get_albums_by_artist.invoke({'artist': artist})}")
+    if artist and any(k in q for k in ["song", "songs", "track", "preference"]):
+        parts.append(f"Tracks for {artist.title()}:\n{get_tracks_by_artist.invoke({'artist': artist})}")
+    if "genre" in q:
+        genre_match = re.search(r"\b(rock|jazz|metal|classical|blues|latin|reggae)\b", q, re.I)
+        if genre_match:
+            g = genre_match.group(1)
+            parts.append(f"Songs in {g}:\n{get_songs_by_genre.invoke({'genre': g})}")
+    if not parts and artist:
+        parts.append(f"Albums for {artist.title()}:\n{get_albums_by_artist.invoke({'artist': artist})}")
+        parts.append(f"Tracks for {artist.title()}:\n{get_tracks_by_artist.invoke({'artist': artist})}")
+    if not parts and mem:
+        parts.append(f"Tracks for preferences ({memory}):\n{get_tracks_by_artist.invoke({'artist': memory})}")
+    return "\n\n".join(parts) if parts else "No matching catalog results found."
 
 
-def music_catalog_agent(state: State, llm) -> dict:
+def _invoice_fallback(customer_id: str, question: str) -> str:
+    if not customer_id:
+        return "Customer ID is required for invoice lookup."
+    data = get_invoices_by_customer_sorted_by_date.invoke({"customer_id": customer_id})
+    return f"Invoices for customer {customer_id} (most recent first):\n{data}"
+
+
+def _summarize_with_llm(llm, system: str, question: str, tool_data: str) -> AIMessage:
+    """Ask the LLM to phrase an answer from already-fetched tool data (no tool calling)."""
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(
+                    content=system
+                    + " Use ONLY the provided data. Do not invent facts. Be concise."
+                ),
+                HumanMessage(
+                    content=(
+                        f"User question:\n{question}\n\n"
+                        f"Data from tools:\n{tool_data}\n\n"
+                        "Write a helpful answer."
+                    )
+                ),
+            ]
+        )
+        if isinstance(response.content, str) and response.content.strip():
+            return response
+    except Exception:
+        pass
+    return AIMessage(content=tool_data)
+
+
+def music_catalog_agent(state: State, llm, focused_question: str | None = None) -> dict:
     memory = state.get("loaded_memory") or "None"
-    cid = state.get("customer_id") or "unknown"
+    question = focused_question or _last_user_text(state["messages"])
+    tool_data = _music_fallback(question, memory)
     system = (
         "You are the Music Catalog sub-agent for a digital music store. "
-        "Answer questions about albums, tracks, artists, genres, and recommendations. "
-        "Use tools to look up catalog data. Be concise and helpful.\n"
-        f"Customer ID: {cid}\n"
-        f"Known preferences: {memory}\n"
-        "If the user asks for songs matching preferences and preferences mention an artist/genre, "
-        "look up tracks for that artist/genre."
+        "Answer ONLY music catalog questions."
     )
-    answer = _run_tool_agent(llm, MUSIC_TOOLS, system, state)
+    answer = _summarize_with_llm(llm, system, question, tool_data)
     return {"messages": [answer]}
 
 
-def invoice_info_agent(state: State, llm) -> dict:
+def invoice_info_agent(state: State, llm, focused_question: str | None = None) -> dict:
     cid = state.get("customer_id") or ""
+    question = focused_question or _last_user_text(state["messages"])
+    tool_data = _invoice_fallback(cid, question)
     system = (
         "You are the Invoice Information sub-agent for a digital music store. "
-        "Answer questions about the customer's invoices, purchases, totals, and support employees. "
-        f"Always use customer_id={cid} when calling tools. "
-        "Be concise. Summarize the most recent purchase clearly when asked."
+        "Answer ONLY invoice/purchase questions. "
+        "Clearly state the most recent purchase date and total when asked."
     )
-    answer = _run_tool_agent(llm, INVOICE_TOOLS, system, state)
+    answer = _summarize_with_llm(llm, system, question, tool_data)
     return {"messages": [answer]}
 
 
 def both_agents(state: State, llm) -> dict:
-    inv = invoice_info_agent(state, llm)
-    mus = music_catalog_agent(state, llm)
-    combined = f"{inv['messages'][0].content}\n\n{mus['messages'][0].content}"
+    text = _last_user_text(state["messages"])
+    inv = invoice_info_agent(
+        state,
+        llm,
+        focused_question=(
+            "Answer only the purchase/invoice part of this request. "
+            f"User said: {text}"
+        ),
+    )
+    mus = music_catalog_agent(
+        state,
+        llm,
+        focused_question=(
+            "Answer only the music catalog part of this request. "
+            f"User said: {text}"
+        ),
+    )
+    combined = (
+        "I've found the information you requested:\n\n"
+        f"{inv['messages'][0].content}\n\n"
+        f"{mus['messages'][0].content}"
+    )
     return {"messages": [AIMessage(content=combined)]}
 
 
